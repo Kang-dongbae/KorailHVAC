@@ -7,130 +7,126 @@ import torch.nn as nn
 import torch.optim as optim
 
 # file load
-data = pd.read_csv(r'C:\Dev\KorailHVAC\filtered_data_sorted.csv', encoding='euc-kr')
+#data = pd.read_csv(r'C:\Dev\KorailHVAC\filtered_data_sorted.csv', encoding='euc-kr')
+data = pd.read_csv(r'filtered_data_sorted.csv', encoding='euc-kr')
 # print(data.head())
 
-def drop_columns(data):
-    columns = [
-    '000 HVAC SDR_T CAR 외부온도',
-    '000 HVAC SDR_T CAR 온도 설정치 변동폭',
-    '100 HVAC SDR_M CAR 외부온도',
-    '100 HVAC SDR_M CAR 온도 설정치 변동폭',
-    '200 HVAC SDR_T CAR 외부온도',
-    '200 HVAC SDR_T CAR 온도 설정치 변동폭',
-    '300 HVAC SDR_T CAR 외부온도',
-    '300 HVAC SDR_T CAR 온도 설정치 변동폭',
-    '400 HVAC SDR_T CAR 외부온도',
-    '400 HVAC SDR_T CAR 온도 설정치 변동폭',
-    '500 HVAC SDR_T CAR 외부온도',
-    '500 HVAC SDR_T CAR 온도 설정치 변동폭',
-    '600 HVAC SDR_T CAR 외부온도',
-    '600 HVAC SDR_T CAR 온도 설정치 변동폭',
-    '700 HVAC SDR_T CAR 외부온도',
-    '700 HVAC SDR_T CAR 온도 설정치 변동폭',
-    '800 HVAC SDR_T CAR 외부온도',
-    '800 HVAC SDR_T CAR 온도 설정치 변동폭',
-    '900 HVAC SDR_T CAR 외부온도',
-    '900 HVAC SDR_T CAR 온도 설정치 변동폭'
-    ]
-    return data.drop(columns=columns)
+def process_car_data(data):
+    # 컬럼 삭제
+    columns_to_drop = [f"{i:03d} HVAC SDR_T CAR {'외부온도' if j == 0 else '온도 설정치 변동폭'}"
+                       for i in range(0, 1000, 100) for j in range(2)]
+    data = data.drop(columns=columns_to_drop, errors='ignore')
 
-data = drop_columns(data)
-print(data.head())
+    # 컬럼 이름 변경
+    old_columns = [f'DEFAULT_DD{i}' for i in range(153, 230, 4)]
+    new_columns = [f'{i:03d} Door_{"Left" if j == 0 else "Right"}'
+                   for i in range(0, 1000, 100) for j in range(2)]
+    data = data.rename(columns=dict(zip(old_columns, new_columns)))
 
+    # 공통 컬럼 정의
+    common_columns = {
+        '발생시각': '발생시각',
+        'DEFAULT_HCR': 'HCR',
+        'DEFAULT_TCR': 'TCR',
+        'DEFAULT_현재역': '현재역',
+        'DEFAULT_다음역': '다음역',
+        'DEFAULT_종착역': '종착역',
+        'DEFAULT_신호장치 속도': '신호장치 속도'
+    }
 
-'''
+    # 컬럼 매핑 생성
+    column_mapping = {
+        col: (None, common_columns[col]) if col in common_columns else
+             (col[:3], col[4:]) if col.startswith(tuple(f"{i:03d} " for i in range(0, 1000, 100)))
+             else (None, col)
+        for col in data.columns
+    }
+
+    # 호차별 데이터 프레임 생성
+    car_dfs = {}
+    for car_num in [f"{i:03d}" for i in range(0, 1000, 100)]:
+        car_columns = [col for col, (num, _) in column_mapping.items() if num == car_num or num is None]
+        temp_df = data[car_columns].copy()
+        temp_df.columns = [common_columns.get(col, column_mapping[col][1]) for col in car_columns]
+        car_dfs[f"{int(car_num)//100 + 1}호차"] = temp_df
+
+    return car_dfs
+
+# 데이터 전처리
+data['발생시각'] = pd.to_datetime(data['발생시각'], errors='coerce')
+car_dfs = process_car_data(data)
+# print(car_dfs['1호차'].head())
+
+car_dfs['1호차'].head(100).to_csv('processed_1.csv', index=False, encoding='utf-8-sig')
+
+# HVAC 제어를 위한 DQN 에이전트 구현
 # DQN 신경망 정의
 class DQN(nn.Module):
     def __init__(self, state_size, action_size):
         super(DQN, self).__init__()
-        self.fc1 = nn.Linear(state_size, 64)
-        self.fc2 = nn.Linear(64, 64)
-        self.fc3 = nn.Linear(64, action_size)
-    
+        self.fc1 = nn.Linear(state_size, 128)
+        self.fc2 = nn.Linear(128, 128)
+        self.fc3 = nn.Linear(128, action_size)
+        
     def forward(self, x):
         x = torch.relu(self.fc1(x))
         x = torch.relu(self.fc2(x))
         return self.fc3(x)
 
-# 경험 재생을 위한 리플레이 메모리
-class ReplayMemory:
-    def __init__(self, capacity):
-        self.memory = deque(maxlen=capacity)
-    
-    def push(self, state, action, reward, next_state, done):
-        self.memory.append((state, action, reward, next_state, done))
-    
-    def sample(self, batch_size):
-        return random.sample(self.memory, batch_size)
-    
-    def __len__(self):
-        return len(self.memory)
-
-# HVAC 제어 환경 시뮬레이터
-class HVACEnv:
-    def __init__(self, data):
-        self.data = data
-        self.current_idx = 0
-        self.n = len(data)
-        self.action_space = [0, 1, 2]  # 0: 미가동, 1: 반냉방, 2: 전냉방
-        self.CO2_threshold = 2000
-        self.T_set = 24.0  # 설정 온도
-        self.P_max = 5.0   # 최대 소비 전력(kW)
-    
+# 환경 클래스 정의
+class HVACEnvironment:
+    def __init__(self, car_df, target_temp=23, max_co2=800):
+        self.df = car_df.reset_index(drop=True)
+        self.target_temp = target_temp
+        self.max_co2 = max_co2
+        self.current_step = 0
+        self.actions = ['Full_AC', 'Half_AC', 'Off']  # 전냉방, 반냉방, 미가동
+        self.state_size = 4  # 실내온도, 실외온도, CO2, 시간대
+        self.action_size = len(self.actions)
+        
     def reset(self):
-        self.current_idx = 0
-        return self._get_state(self.current_idx)
+        self.current_step = 0
+        return self._get_state()
     
-    def _get_state(self, idx):
-        # 상태 벡터: [Tin_avg, Tout_avg, CO2_avg, ΔTin, ΔTout, ΔCO2, Δt]
-        if idx == 0:
-            prev = self.data.iloc[idx]
-        else:
-            prev = self.data.iloc[idx-1]
-        
-        curr = self.data.iloc[idx]
-        state = np.array([
-            curr['Tin_mean'],
-            curr['Tout_mean'],
-            curr['CO2_mean'],
-            curr['Tin_mean'] - prev['Tin_mean'],
-            curr['Tout_mean'] - prev['Tout_mean'],
-            curr['CO2_mean'] - prev['CO2_mean'],
-            curr['duration']
-        ], dtype=np.float32)
-        return state
-    
+    def _get_state(self):
+        if self.current_step >= len(self.df):
+            return np.zeros(self.state_size, dtype=np.float32)
+        row = self.df.iloc[self.current_step]
+        indoor_temp = row['HVAC SD_실내온도 값'] if pd.notna(row['HVAC SD_실내온도 값']) else 25.0
+        outdoor_temp = row['HVAC SD_실외온도 값'] if pd.notna(row['HVAC SD_실외온도 값']) else 15.0
+        co2 = row['HVAC SD_CO2 센서 값'] if pd.notna(row['HVAC SD_CO2 센서 값']) else 500.0
+        hour = pd.to_datetime(row['발생시각']).hour
+        return np.array([indoor_temp, outdoor_temp, co2, hour], dtype=np.float32)
+
     def step(self, action):
-        curr = self.data.iloc[self.current_idx]
-        Tin = curr['Tin_mean']
-        CO2 = curr['CO2_mean']
+        if self.current_step >= len(self.df) - 1:
+            return self._get_state(), 0, True
         
-        # 액션에 따른 전력 소비 계산
-        if action == 0:    # 미가동
-            P_HVAC = 0
+        # 현재 상태
+        row = self.df.iloc[self.current_step]
+        indoor_temp = row['HVAC SD_실내온도 값'] if pd.notna(row['HVAC SD_실내온도 값']) else 25.0
+        co2 = row['HVAC SD_CO2 센서 값'] if pd.notna(row['HVAC SD_CO2 센서 값']) else 500.0
+        
+        # 행동에 따른 온도 변화 (간단한 시뮬레이션)
+        if action == 0:  # 전냉방
+            indoor_temp -= 2.0
+            energy_cost = 5
         elif action == 1:  # 반냉방
-            P_HVAC = self.P_max * 0.5
-        elif action == 2:  # 전냉방
-            P_HVAC = self.P_max
+            indoor_temp -= 1.0
+            energy_cost = 2
+        else:  # 미가동
+            indoor_temp += 0.5
+            energy_cost = 0
         
-        # 보상 구성 요소 계산
-        delta_T = abs(Tin - self.T_set)
-        R_comfort = -delta_T / 5.0  # 편의성 보상
+        # 보상 계산
+        temp_diff = abs(indoor_temp - self.target_temp)
+        co2_penalty = 0.01 * max(0, co2 - self.max_co2)
+        reward = 10 - temp_diff - co2_penalty - energy_cost
         
-        R_energy = -P_HVAC / self.P_max  # 에너지 보상
-        
-        # 공기질 보상 (CO2 > 2000ppm 시 패널티)
-        R_air_quality = -max(0, CO2 - 2000) / 3000
-        
-        # 가중치 적용된 총 보상
-        w1, w2, w3 = 0.4, 0.4, 0.2  # 가중치 (편의성, 에너지, 공기질)
-        reward = w1 * R_comfort + w2 * R_energy + w3 * R_air_quality
-        
-        # 다음 상태 업데이트
-        self.current_idx += 1
-        done = self.current_idx >= self.n - 1
-        next_state = self._get_state(self.current_idx) if not done else None
+        # 다음 단계로 이동
+        self.current_step += 1
+        done = self.current_step >= len(self.df) - 1
+        next_state = self._get_state()
         
         return next_state, reward, done
 
@@ -139,9 +135,72 @@ class DQNAgent:
     def __init__(self, state_size, action_size):
         self.state_size = state_size
         self.action_size = action_size
-        self.memory = ReplayMemory(10000)
-        self.gamma = 0.99    # 할인 계수
-        self.epsilon = 1.0    # 탐험률
+        self.memory = deque(maxlen=2000)
+        self.gamma = 0.95  # 할인율
+        self.epsilon = 1.0  # 탐험 비율
         self.epsilon_min = 0.01
-        self.epsilon_decay
-'''
+        self.epsilon_decay = 0.995
+        self.model = DQN(state_size, action_size)
+        self.target_model = DQN(state_size, action_size)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
+        self.update_target_model()
+        
+    def update_target_model(self):
+        self.target_model.load_state_dict(self.model.state_dict())
+        
+    def remember(self, state, action, reward, next_state, done):
+        self.memory.append((state, action, reward, next_state, done))
+        
+    def act(self, state):
+        if np.random.rand() <= self.epsilon:
+            return random.randrange(self.action_size)
+        state = torch.FloatTensor(state).unsqueeze(0)
+        act_values = self.model(state)
+        return torch.argmax(act_values).item()
+    
+    def replay(self, batch_size):
+        if len(self.memory) < batch_size:
+            return
+        minibatch = random.sample(self.memory, batch_size)
+        for state, action, reward, next_state, done in minibatch:
+            state = torch.FloatTensor(state).unsqueeze(0)
+            next_state = torch.FloatTensor(next_state).unsqueeze(0)
+            target = reward
+            if not done:
+                target = reward + self.gamma * torch.max(self.target_model(next_state)).item()
+            target_f = self.model(state)
+            target_f[0][action] = target
+            self.optimizer.zero_grad()
+            loss = nn.MSELoss()(target_f, self.model(state))
+            loss.backward()
+            self.optimizer.step()
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
+
+# DQN 에이전트 학습
+def train_dqn(car_dfs, episodes=50, batch_size=32):
+    for car_name, df in car_dfs.items():
+        print(f"Training DQN for {car_name}")
+        df['발생시각'] = pd.to_datetime(df['발생시각'], errors='coerce')
+        env = HVACEnvironment(df)
+        agent = DQNAgent(env.state_size, env.action_size)
+        
+        for e in range(episodes):
+            state = env.reset()
+            total_reward = 0
+            for _ in range(len(df)):
+                action = agent.act(state)
+                next_state, reward, done = env.step(action)
+                agent.remember(state, action, reward, next_state, done)
+                state = next_state
+                total_reward += reward
+                agent.replay(batch_size)
+                if done:
+                    break
+            agent.update_target_model()
+            print(f"Episode {e+1}/{episodes}, Total Reward: {total_reward:.2f}, Epsilon: {agent.epsilon:.2f}")
+        
+        # 학습된 모델 저장
+        torch.save(agent.model.state_dict(), f"{car_name}_dqn_model.pth")
+
+train_dqn(car_dfs)
