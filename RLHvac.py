@@ -9,15 +9,41 @@ import torch.optim as optim
 # file load
 #data = pd.read_csv(r'C:\Dev\KorailHVAC\filtered_data_sorted.csv', encoding='euc-kr')
 data = pd.read_csv(r'filtered_data_sorted.csv', encoding='euc-kr')
-# print(data.head())
+#print(data.head())
+
+data['발생시각'] = pd.to_datetime(data['발생시각'], errors='coerce')
 
 def process_car_data(data):
+     # 필요한 컬럼 정의
+    required_columns = [
+        '발생시각',
+        'HVAC SD_실내온도 값',
+        'HVAC SD_실외온도 값',
+        'HVAC SD_CO2 센서 값',
+        'HVAC SD_전냉 CFULL',
+        'HVAC SD_반냉 CHALF',
+        'HVAC SD_OFF',
+        'HVAC SDR_T CAR 자동 AUTO'
+    ]
+    
+    # 변경할 컬럼 이름 매핑
+    column_rename = {
+        '발생시각': 'Time',
+        'HVAC SD_실내온도 값': 'InTemp',
+        'HVAC SD_실외온도 값': 'OutTemp',
+        'HVAC SD_CO2 센서 값': 'CO2',
+        'HVAC SD_전냉 CFULL': 'CFULL',
+        'HVAC SD_반냉 CHALF': 'CHALF',
+        'HVAC SD_OFF': 'OFF',
+        'HVAC SDR_T CAR 자동 AUTO': 'Auto'
+    }
+    
     # 컬럼 삭제
     columns_to_drop = [f"{i:03d} HVAC SDR_T CAR {'외부온도' if j == 0 else '온도 설정치 변동폭'}"
                        for i in range(0, 1000, 100) for j in range(2)]
     data = data.drop(columns=columns_to_drop, errors='ignore')
 
-    # 컬럼 이름 변경
+    # 컬럼 이름 변경 (DEFAULT_DD{i} → Door_{Left/Right})
     old_columns = [f'DEFAULT_DD{i}' for i in range(153, 230, 4)]
     new_columns = [f'{i:03d} Door_{"Left" if j == 0 else "Right"}'
                    for i in range(0, 1000, 100) for j in range(2)]
@@ -42,26 +68,44 @@ def process_car_data(data):
         for col in data.columns
     }
 
-    # 호차별 데이터 프레임 생성
+    # 호차별 데이터프레임 생성
     car_dfs = {}
     for car_num in [f"{i:03d}" for i in range(0, 1000, 100)]:
         car_columns = [col for col, (num, _) in column_mapping.items() if num == car_num or num is None]
         temp_df = data[car_columns].copy()
         temp_df.columns = [common_columns.get(col, column_mapping[col][1]) for col in car_columns]
-        car_dfs[f"{int(car_num)//100 + 1}호차"] = temp_df
+        
+        # 필요한 컬럼만 필터링
+        available_columns = [col for col in required_columns if col in temp_df.columns]
+        if available_columns:
+            temp_df = temp_df[available_columns]
+            # 컬럼 이름 변경
+            temp_df = temp_df.rename(columns=column_rename)
+            # 결측값 처리
+            #temp_df['Time'] = pd.to_datetime(temp_df['Time'], errors='coerce')
+            #temp_df['InTemp'] = temp_df['InTemp'].fillna(25.0)
+            #temp_df['OutTemp'] = temp_df['OutTemp'].fillna(15.0)
+            #temp_df['CO2'] = temp_df['CO2'].fillna(500.0)
+            #temp_df['CFULL'] = temp_df['CFULL'].fillna(0)
+            #temp_df['CHALF'] = temp_df['CHALF'].fillna(0)
+            #temp_df['OFF'] = temp_df['OFF'].fillna(0)
+            # 중복 제거
+            car_dfs[f"{int(car_num)//100 + 1}호차"] = temp_df
 
+    print("completed process_car_data")
     return car_dfs
 
 # 데이터 전처리
-data['발생시각'] = pd.to_datetime(data['발생시각'], errors='coerce')
+
 car_dfs = process_car_data(data)
-# print(car_dfs['1호차'].head())
+print(car_dfs['1호차'].head())
+car_dfs['1호차'].head(3000).to_csv('processed_1.csv', index=False, encoding='utf-8-sig')
 
-car_dfs['1호차'].head(100).to_csv('processed_1.csv', index=False, encoding='utf-8-sig')
-
+'''
 # HVAC 제어를 위한 DQN 에이전트 구현
 # DQN 신경망 정의
 class DQN(nn.Module):
+
     def __init__(self, state_size, action_size):
         super(DQN, self).__init__()
         self.fc1 = nn.Linear(state_size, 128)
@@ -204,3 +248,5 @@ def train_dqn(car_dfs, episodes=50, batch_size=32):
         torch.save(agent.model.state_dict(), f"{car_name}_dqn_model.pth")
 
 train_dqn(car_dfs)
+
+'''
