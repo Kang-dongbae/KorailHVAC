@@ -98,10 +98,9 @@ def process_car_data(data):
 # 데이터 전처리
 
 car_dfs = process_car_data(data)
-print(car_dfs['1호차'].head())
-car_dfs['1호차'].head(3000).to_csv('processed_1.csv', index=False, encoding='utf-8-sig')
+#print(car_dfs['1호차'].head())
+#car_dfs['1호차'].head(3000).to_csv('processed_1.csv', index=False, encoding='utf-8-sig')
 
-'''
 # HVAC 제어를 위한 DQN 에이전트 구현
 # DQN 신경망 정의
 class DQN(nn.Module):
@@ -248,5 +247,3 @@ def train_dqn(car_dfs, episodes=50, batch_size=32):
         torch.save(agent.model.state_dict(), f"{car_name}_dqn_model.pth")
 
 train_dqn(car_dfs)
-
-'''
